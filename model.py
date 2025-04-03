@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
+import torch.nn as nn
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
@@ -58,18 +59,7 @@ class RadarGestureDataset(Dataset):
         sample = torch.tensor(self.samples[idx])
         label = self.labels[idx]
         return sample, label
-
-dataset = RadarGestureDataset(data_dir="path/to/dataset", seq_length=30)
-
-train_data, test_data = train_test_split(dataset, test_size=0.2, random_state=42)
-train_data, val_data = train_test_split(train_data, test_size=0.1, random_state=42)
-
-train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
-val_loader = DataLoader(val_data, batch_size=batch_size)
-test_loader = DataLoader(test_data, batch_size=batch_size)
-
-import torch.nn as nn
-
+    
 class GestureLSTM(nn.Module):
     def __init__(self, input_size, hidden_size, num_classes):
         super().__init__()
@@ -93,16 +83,82 @@ class GestureLSTM(nn.Module):
         )
 
     def forward(self, x):
-        # x shape: (batch_size, seq_len, input_size)
+        # (batch_size, seq_len, input_size)
         lstm_out, _ = self.lstm(x)  # (batch_size, seq_len, hidden_size*2)
-        
+    
         attn_weights = torch.softmax(
             self.attention(lstm_out).squeeze(-1), dim=1)
         context = torch.sum(lstm_out * attn_weights.unsqueeze(-1), dim=1)
         
         return self.classifier(context)
 
+dataset = RadarGestureDataset(data_dir="/data", seq_length=30)
+
+train_data, test_data = train_test_split(dataset, test_size=0.2, random_state=42)
+train_data, val_data = train_test_split(train_data, test_size=0.1, random_state=42)
+
+batch_size = 32
+train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_data, batch_size=batch_size)
+test_loader = DataLoader(test_data, batch_size=batch_size)
+
 # 输入特征维度：根据数据预处理后的特征数量确定
-# 示例中聚合后特征数量：2(Range) + 2(Velocity) + 1(PeakValue) + 2(x) + 2(y) = 9
+# 聚合后特征数量：2(Range) + 2(Velocity) + 1(PeakValue) + 2(x) + 2(y) = 9
 model = GestureLSTM(input_size=9, hidden_size=64, 
                   num_classes=len(dataset.classes))
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = model.to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+def train_epoch(model, loader, optimizer, criterion):
+    model.train()
+    total_loss, correct = 0, 0
+    for inputs, labels in loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item() * inputs.size(0)
+        _, preds = torch.max(outputs, 1)
+        correct += (preds == labels).sum().item()
+    
+    epoch_loss = total_loss / len(loader.dataset)
+    epoch_acc = correct / len(loader.dataset)
+    return epoch_loss, epoch_acc
+
+def evaluate(model, loader, criterion):
+    model.eval()
+    total_loss, correct = 0, 0
+    with torch.no_grad():
+        for inputs, labels in loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            
+            total_loss += loss.item() * inputs.size(0)
+            _, preds = torch.max(outputs, 1)
+            correct += (preds == labels).sum().item()
+    
+    epoch_loss = total_loss / len(loader.dataset)
+    epoch_acc = correct / len(loader.dataset)
+    return epoch_loss, epoch_acc
+
+num_epochs = 20
+best_acc = 0
+
+for epoch in range(num_epochs):
+    train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion)
+    val_loss, val_acc = evaluate(model, val_loader, criterion)
+    
+    print(f"Epoch {epoch+1}/{num_epochs}")
+    print(f"Train Loss: {train_loss:.4f} | Acc: {train_acc:.4f}")
+    print(f"Val Loss: {val_loss:.4f} | Acc: {val_acc:.4f}")
+    
+    if val_acc > best_acc:
+        best_acc = val_acc
+        torch.save(model.state_dict(), "best_model.pth")
