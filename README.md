@@ -5,7 +5,7 @@
 
 **Model**: LSTM+attention  
 
-**Result**: 
+**Result**: still training
 | Model       | Accuracy | Inference Time |
 |-------------|----------|----------------|
 | LSTM+attention        |    |          |
